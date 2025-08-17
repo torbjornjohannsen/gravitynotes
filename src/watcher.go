@@ -10,12 +10,13 @@ import (
 )
 
 type FileWatcher struct {
-	reconciler   *Reconciler
-	fileManager  *FileManager
-	watcher      *fsnotify.Watcher
-	stopCh       chan bool
-	isWatching   bool
-	isWriting    bool
+	reconciler      *Reconciler
+	fileManager     *FileManager
+	watcher         *fsnotify.Watcher
+	stopCh          chan bool
+	isWatching      bool
+	isWriting       bool
+	ignoreNextWrite bool
 }
 
 func NewFileWatcher(reconciler *Reconciler, fileManager *FileManager) (*FileWatcher, error) {
@@ -25,12 +26,13 @@ func NewFileWatcher(reconciler *Reconciler, fileManager *FileManager) (*FileWatc
 	}
 
 	return &FileWatcher{
-		reconciler:  reconciler,
-		fileManager: fileManager,
-		watcher:     watcher,
-		stopCh:      make(chan bool),
-		isWatching:  false,
-		isWriting:   false,
+		reconciler:      reconciler,
+		fileManager:     fileManager,
+		watcher:         watcher,
+		stopCh:          make(chan bool),
+		isWatching:      false,
+		isWriting:       false,
+		ignoreNextWrite: false,
 	}, nil
 }
 
@@ -58,7 +60,7 @@ func (fw *FileWatcher) Stop() error {
 
 	fw.stopCh <- true
 	fw.isWatching = false
-	
+
 	if err := fw.watcher.Close(); err != nil {
 		return fmt.Errorf("failed to close file watcher: %w", err)
 	}
@@ -94,6 +96,7 @@ func (fw *FileWatcher) watchLoop() {
 					log.Println("File change detected - reconciliation completed")
 				}
 				fw.isWriting = false
+				fw.ignoreNextWrite = true
 			}
 
 		case err, ok := <-fw.watcher.Errors:
@@ -112,8 +115,13 @@ func (fw *FileWatcher) watchLoop() {
 
 func (fw *FileWatcher) shouldProcessEvent(event fsnotify.Event) bool {
 	notesPath := fw.fileManager.GetNotesPath()
-	
+
 	if event.Name != notesPath || fw.isWriting {
+		return false
+	}
+
+	if fw.ignoreNextWrite {
+		fw.ignoreNextWrite = false
 		return false
 	}
 
