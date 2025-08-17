@@ -63,10 +63,6 @@ def add_note_to_system(content: str, author: str) -> bool:
         bool: True if successful, False otherwise
     """
     try:
-        # Format the note with author and timestamp
-        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M')
-        formatted_note = f"[Discord - {author} - {timestamp}] {content}"
-        
         # Get the absolute path to the notes CLI
         cli_path = Path(__file__).parent / NOTES_CLI_PATH
         cli_path = cli_path.resolve()
@@ -77,7 +73,7 @@ def add_note_to_system(content: str, author: str) -> bool:
         
         # Execute the notes add command
         result = subprocess.run(
-            [str(cli_path), 'add', formatted_note],
+            [str(cli_path), 'add', content],
             capture_output=True,
             text=True,
             timeout=30,
