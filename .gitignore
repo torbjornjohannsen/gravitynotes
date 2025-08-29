@@ -1,6 +1,7 @@
 notes.md 
 notes.db 
 notes 
+__pycache__
 
 venv/ 
 

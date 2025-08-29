@@ -32,15 +32,20 @@ logger = logging.getLogger(__name__)
 
 # Bot configuration
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
-CHANNEL_ID = int(os.getenv('CHANNEL_ID', 0))
+NOTES_CHANNEL_ID = int(os.getenv('NOTES_CHANNEL_ID', 0))
+COMMAND_CHANNEL_ID = int(os.getenv('COMMAND_CHANNEL_ID', 0))
 NOTES_CLI_PATH = os.getenv('NOTES_CLI_PATH', '../notes')
 
 if not DISCORD_TOKEN:
     logger.error("DISCORD_TOKEN environment variable is required")
     sys.exit(1)
 
-if not CHANNEL_ID:
-    logger.error("CHANNEL_ID environment variable is required")
+if not NOTES_CHANNEL_ID:
+    logger.error("NOTES_CHANNEL_ID environment variable is required")
+    sys.exit(1)
+
+if not COMMAND_CHANNEL_ID:
+    logger.error("NOTES_CHANNEL_ID environment variable is required")
     sys.exit(1)
 
 # Configure bot intents
@@ -51,13 +56,13 @@ intents.messages = True
 # Create bot instance
 bot = commands.Bot(command_prefix='!', intents=intents)
 
-def add_note_to_system(content: str, author: str) -> bool:
+def execute_command_in_CLI(cmd: str, content: str) -> bool:
     """
-    Add a note to the GravityNotes system using the CLI.
+    Execute a command using the GravityNotes CLI.
     
     Args:
+        cmd: The command to run 
         content: The message content to add
-        author: The author of the message
         
     Returns:
         bool: True if successful, False otherwise
@@ -73,18 +78,18 @@ def add_note_to_system(content: str, author: str) -> bool:
         
         # Execute the notes add command
         result = subprocess.run(
-            [str(cli_path), 'add', content],
+            [str(cli_path), cmd, content],
             capture_output=True,
             text=True,
             timeout=30,
             cwd=cli_path.parent
         )
-        
+
         if result.returncode == 0:
-            logger.info(f"Successfully added note from {author}: {content[:100]}...")
+            logger.info(f"Successfully executed {cmd}: {content[:100]}...")
             return True
         else:
-            logger.error(f"Failed to add note. Exit code: {result.returncode}")
+            logger.error(f"Failed to execute command. Exit code: {result.returncode}")
             logger.error(f"Stderr: {result.stderr}")
             return False
             
@@ -92,8 +97,110 @@ def add_note_to_system(content: str, author: str) -> bool:
         logger.error("Notes CLI command timed out")
         return False
     except Exception as e:
-        logger.error(f"Error adding note to system: {e}")
+        logger.error(f"Error executing {cmd}: {e}")
         return False
+
+async def process_note_message(message, channel_name: str) -> bool:
+    """
+    Process a message's content and add it to the notes system.
+    
+    Args:
+        message: Discord message object
+        channel_name: Name of the channel for logging
+        
+    Returns:
+        bool: True if successfully processed and should be deleted, False otherwise
+    """
+    # Skip messages from the bot itself
+    if message.author == bot.user:
+        return False
+    
+    # Skip empty messages
+    if not message.content.strip():
+        logger.info(f"Skipping empty message from {message.author.display_name}")
+        return False
+    
+    logger.info(f"Processing message from {message.author.display_name} in #{channel_name}: {message.content[:100]}...")
+    
+    # Add the message to the notes system
+    success = execute_command_in_CLI('add', message.content)
+    
+    if success:
+        logger.info(f"Message captured successfully")
+        return True
+    else:
+        logger.error("Failed to add note")
+        return False
+
+async def sync_channel_messages(channel):
+    """
+    Sync all existing messages from the channel to the notes system.
+    
+    Args:
+        channel: Discord channel object
+    """
+    logger.info(f"Starting message sync for channel #{channel.name}")
+    
+    try:
+        # Fetch all messages from the channel, oldest first
+        messages = []
+        async for message in channel.history(limit=None, oldest_first=True):
+            messages.append(message)
+        
+        if not messages:
+            logger.info("No messages found in channel")
+            return
+        
+        logger.info(f"Found {len(messages)} messages to sync")
+        
+        processed_count = 0
+        deleted_count = 0
+        
+        for i, message in enumerate(messages, 1):
+            logger.info(f"Processing message {i}/{len(messages)}")
+            
+            # Process the message content
+            should_delete = await process_note_message(message, channel.name)
+            
+            if should_delete:
+                try:
+                    await message.delete()
+                    deleted_count += 1
+                    logger.info(f"Message {i} deleted successfully")
+                except discord.Forbidden:
+                    logger.error(f"No permission to delete message {i}")
+                except discord.NotFound:
+                    logger.warning(f"Message {i} was already deleted")
+                except Exception as e:
+                    logger.error(f"Error deleting message {i}: {e}")
+                
+                processed_count += 1
+            
+            # Add a small delay to avoid hitting rate limits
+            await asyncio.sleep(0.1)
+        
+        logger.info(f"Sync complete: {processed_count} messages processed, {deleted_count} messages deleted")
+        
+    except discord.Forbidden:
+        logger.error("Bot doesn't have permission to read message history in this channel")
+    except Exception as e:
+        logger.error(f"Error during message sync: {e}")
+
+async def handle_command(message): 
+    # Skip messages from the bot itself
+    if message.author == bot.user:
+        return False
+    
+    # Skip empty messages
+    if not message.content.strip():
+        logger.info(f"Skipping empty message from {message.author.display_name}")
+        return False
+    
+    logger.info(f"Processing command from {message.author.display_name}:  {message.content[:100]}...")
+
+    success = execute_command_in_CLI(message.content, '')
+
+    return success
 
 @bot.event
 async def on_ready():
@@ -101,11 +208,15 @@ async def on_ready():
     logger.info(f"Bot logged in as {bot.user.name} (ID: {bot.user.id})")
     
     # Verify the target channel exists and is accessible
-    channel = bot.get_channel(CHANNEL_ID)
+    channel = bot.get_channel(NOTES_CHANNEL_ID)
     if channel:
-        logger.info(f"Monitoring channel: #{channel.name} (ID: {CHANNEL_ID})")
+        logger.info(f"Monitoring channel: #{channel.name} (ID: {NOTES_CHANNEL_ID})")
+        
+        # Sync all existing messages from the channel
+        await sync_channel_messages(channel)
+        
     else:
-        logger.error(f"Could not access channel with ID: {CHANNEL_ID}")
+        logger.error(f"Could not access channel with ID: {NOTES_CHANNEL_ID}")
         logger.error("Make sure the bot has permission to view the channel")
 
 @bot.event
@@ -113,38 +224,37 @@ async def on_message(message):
     """
     Handle incoming messages. Capture and delete messages from the target channel.
     """
-    # Ignore messages from the bot itself
-    if message.author == bot.user:
-        return
-    
     # Only process messages from the target channel
-    if message.channel.id != CHANNEL_ID:
-        return
-    
-    # Skip empty messages
-    if not message.content.strip():
-        logger.info(f"Skipping empty message from {message.author.display_name}")
-        return
-    
-    logger.info(f"Processing message from {message.author.display_name}: {message.content[:100]}...")
-    
-    try:
-        # Add the message to the notes system
-        success = add_note_to_system(message.content, message.author.display_name)
+    if message.channel.id == NOTES_CHANNEL_ID:
         
-        if success:
+        # Get channel for logging
+        channel = bot.get_channel(NOTES_CHANNEL_ID)
+        channel_name = channel.name if channel else str(NOTES_CHANNEL_ID)
+        
+        # Process the message content
+        should_delete = await process_note_message(message, channel_name)
+    elif message.channel.id == COMMAND_CHANNEL_ID: 
+        
+        # Get channel for logging
+        channel = bot.get_channel(COMMAND_CHANNEL_ID)
+        channel_name = channel.name if channel else str(COMMAND_CHANNEL_ID)
+        
+        # Process the message content
+        should_delete = await handle_command(message)
+    else: 
+        return 
+
+    if should_delete:
+        try:
             # Delete the original message
             await message.delete()
-            logger.info(f"Message captured and deleted successfully")
-        else:
-            logger.error("Failed to add note - message not deleted")
-            
-    except discord.Forbidden:
-        logger.error("Bot doesn't have permission to delete messages in this channel")
-    except discord.NotFound:
-        logger.warning("Message was already deleted")
-    except Exception as e:
-        logger.error(f"Error processing message: {e}")
+            logger.info(f"Real-time message captured and deleted successfully")
+        except discord.Forbidden:
+            logger.error("Bot doesn't have permission to delete messages in this channel")
+        except discord.NotFound:
+            logger.warning("Message was already deleted")
+        except Exception as e:
+            logger.error(f"Error deleting real-time message: {e}")
 
 @bot.event
 async def on_error(event, *args, **kwargs):
@@ -159,7 +269,7 @@ async def ping_command(ctx):
 @bot.command(name='status')
 async def status_command(ctx):
     """Display bot status and configuration."""
-    if ctx.channel.id != CHANNEL_ID:
+    if ctx.channel.id != COMMAND_CHANNEL_ID:
         await ctx.send("This command only works in the monitored channel.")
         return
     
@@ -168,7 +278,7 @@ async def status_command(ctx):
         color=0x00ff00,
         timestamp=datetime.now()
     )
-    embed.add_field(name="Monitored Channel", value=f"<#{CHANNEL_ID}>", inline=False)
+    embed.add_field(name="Monitored Channel", value=f"<#{COMMAND_CHANNEL_ID}>", inline=False)
     embed.add_field(name="Notes CLI", value=NOTES_CLI_PATH, inline=False)
     embed.add_field(name="Status", value="✅ Active", inline=False)
     

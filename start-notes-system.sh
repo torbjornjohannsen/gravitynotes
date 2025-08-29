@@ -203,7 +203,7 @@ main() {
     echo
     
     # Start services
-    start_notes_watcher
+    #start_notes_watcher
     start_discord_bot
     echo
     

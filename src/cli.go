@@ -25,16 +25,19 @@ func main() {
 	command := os.Args[1]
 
 	var err error
-	cwd, err := os.Getwd()
-	if err != nil {
-		log.Fatalf("Failed to get current directory: %v", err)
+	basePath := os.Getenv("NOTES_PATH")
+	if basePath == "" {
+		basePath, err = os.Getwd()
+		if err != nil {
+			log.Fatalf("Failed to get current directory: %v", err)
+		}
 	}
 
-	fileManager = NewFileManager(cwd)
+	fileManager = NewFileManager(basePath)
 
 	if command != "init" {
 		if !fileManager.DatabaseExists() {
-			fmt.Println("Error: No notes repository found. Run 'notes init' first.")
+			fmt.Printf("Error: No notes repository found in %s. Run 'notes init' first.\n", fileManager.dbPath)
 			os.Exit(1)
 		}
 
@@ -77,13 +80,17 @@ func printUsage() {
 }
 
 func handleInit() {
-	cwd, err := os.Getwd()
-	if err != nil {
-		log.Fatalf("Failed to get current directory: %v", err)
+	basePath := os.Getenv("NOTES_PATH")
+	if basePath == "" {
+		var err error
+		basePath, err = os.Getwd()
+		if err != nil {
+			log.Fatalf("Failed to get current directory: %v", err)
+		}
 	}
 
-	fm := NewFileManager(cwd)
-	
+	fm := NewFileManager(basePath)
+
 	if fm.DatabaseExists() {
 		fmt.Printf("Repository already exists at %s\n", filepath.Dir(fm.GetDBPath()))
 		return
@@ -96,7 +103,7 @@ func handleInit() {
 	defer database.Close()
 
 	reconciler := NewReconciler(database, fm)
-	
+
 	if err := reconciler.Initialize(); err != nil {
 		log.Fatalf("Failed to initialize repository: %v", err)
 	}
@@ -110,13 +117,13 @@ func handleAdd() {
 		fmt.Println("Usage: notes add \"content\"")
 		os.Exit(1)
 	}
-	
+
 	content := os.Args[2]
 	if content == "" {
 		fmt.Println("Error: content cannot be empty")
 		os.Exit(1)
 	}
-	
+
 	if err := reconciler.AddBlock(content); err != nil {
 		log.Fatalf("Failed to add note: %v", err)
 	}
@@ -130,13 +137,13 @@ func handleGrep() {
 		fmt.Println("Usage: notes grep \"search term\"")
 		os.Exit(1)
 	}
-	
+
 	searchTerm := os.Args[2]
 	if searchTerm == "" {
 		fmt.Println("Error: search term cannot be empty")
 		os.Exit(1)
 	}
-	
+
 	blocks, err := reconciler.SearchBlocks(searchTerm)
 	if err != nil {
 		log.Fatalf("Failed to search: %v", err)
@@ -149,7 +156,7 @@ func handleGrep() {
 
 	fmt.Printf("Found %d blocks matching '%s':\n\n", len(blocks), searchTerm)
 	for i, block := range blocks {
-		fmt.Printf("--- Block %d (updated: %s) ---\n", i+1, 
+		fmt.Printf("--- Block %d (updated: %s) ---\n", i+1,
 			block.UpdatedAt.Format("2006-01-02 15:04:05"))
 		fmt.Println(block.Content)
 		if i < len(blocks)-1 {
@@ -176,7 +183,7 @@ func handleWatch() {
 		log.Fatalf("Failed to start file watcher: %v", err)
 	}
 
-	fmt.Printf("Watching %s for changes. Press Ctrl+C to stop.\n", 
+	fmt.Printf("Watching %s for changes. Press Ctrl+C to stop.\n",
 		fileManager.GetNotesPath())
 
 	sigCh := make(chan os.Signal, 1)
@@ -184,7 +191,7 @@ func handleWatch() {
 
 	<-sigCh
 	fmt.Println("\nStopping file watcher...")
-	
+
 	if err := watcher.Stop(); err != nil {
 		log.Printf("Error stopping watcher: %v", err)
 	}

@@ -28,7 +28,7 @@ func (r *Reconciler) ReconcileFromFile() error {
 	}
 
 	fileBlocks := ParseBlocksFromMarkdown(content)
-	
+
 	lastReconciliationTime, err := r.getLastReconciliationTime()
 	if err != nil {
 		return fmt.Errorf("failed to get last reconciliation time: %w", err)
@@ -42,11 +42,11 @@ func (r *Reconciler) ReconcileFromFile() error {
 		return fmt.Errorf("failed to remove deleted blocks: %w", err)
 	}
 
-	if err := r.updateLastReconciliationTime(); err != nil {
-		return fmt.Errorf("failed to update reconciliation time: %w", err)
+	if err := r.RegenerateMarkdownFile(); err != nil {
+		return fmt.Errorf("failed to regnerate markdown file: %w", err)
 	}
 
-	return r.RegenerateMarkdownFile()
+	return r.updateLastReconciliationTime()
 }
 
 func (r *Reconciler) processFileBlocks(fileBlocks []*Block) error {
@@ -88,7 +88,7 @@ func (r *Reconciler) removeDeletedBlocks(fileBlocks []*Block, lastReconciliation
 				log.Printf("Preserving CLI-added block (ID: %d) created after last reconciliation", dbBlock.ID)
 				continue
 			}
-			
+
 			if err := r.db.DeleteBlock(dbBlock.ID); err != nil {
 				return fmt.Errorf("failed to delete block %d: %w", dbBlock.ID, err)
 			}
@@ -106,7 +106,7 @@ func (r *Reconciler) RegenerateMarkdownFile() error {
 	}
 
 	content := BlocksToMarkdown(blocks)
-	
+
 	if err := r.fileManager.WriteMarkdownFile(content); err != nil {
 		return fmt.Errorf("failed to write markdown file: %w", err)
 	}
@@ -135,8 +135,11 @@ func (r *Reconciler) getLastReconciliationTime() (time.Time, error) {
 
 func (r *Reconciler) updateLastReconciliationTime() error {
 	now := time.Now()
-	timeStr := strconv.FormatInt(now.Unix(), 10)
-	
+	// we add 1 since unixtime is in seconds and the whole process usually takes less than 1s
+	// thus we'll get a bunch of false positives, since generation of new blocks and reconciliation
+	// happen on the same second
+	timeStr := strconv.FormatInt(now.Unix()+1, 10)
+
 	if err := r.db.SetMetadata(LastReconciliationTimeKey, timeStr); err != nil {
 		return fmt.Errorf("failed to update reconciliation time: %w", err)
 	}
