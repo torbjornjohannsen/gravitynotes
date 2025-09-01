@@ -209,3 +209,18 @@ func (d *Database) GetBlocksCreatedAfter(timestamp time.Time) ([]*Block, error) 
 
 	return blocks, nil
 }
+
+func (d *Database) DeleteBlocksByTag(tag string) (int, error) {
+	query := `DELETE FROM blocks WHERE content LIKE ?`
+	result, err := d.db.Exec(query, "%"+tag+"%")
+	if err != nil {
+		return 0, fmt.Errorf("failed to delete blocks with tag '%s': %w", tag, err)
+	}
+	
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("failed to get affected rows count: %w", err)
+	}
+	
+	return int(rowsAffected), nil
+}

@@ -59,6 +59,8 @@ func main() {
 		handleGrep()
 	case "export":
 		handleExport()
+	case "ingest":
+		handleIngest()
 	case "watch":
 		handleWatch()
 	default:
@@ -76,6 +78,7 @@ func printUsage() {
 	fmt.Println("  add \"content\"            Add new note block")
 	fmt.Println("  grep \"search term\"       Search across all blocks")
 	fmt.Println("  export                  Force regenerate .md from DB")
+	fmt.Println("  ingest \"tag\" filename    Replace all blocks containing tag with file content")
 	fmt.Println("  watch                   Start file watcher (development)")
 }
 
@@ -154,10 +157,7 @@ func handleGrep() {
 		return
 	}
 
-	fmt.Printf("Found %d blocks matching '%s':\n\n", len(blocks), searchTerm)
 	for i, block := range blocks {
-		fmt.Printf("--- Block %d (updated: %s) ---\n", i+1,
-			block.UpdatedAt.Format("2006-01-02 15:04:05"))
 		fmt.Println(block.Content)
 		if i < len(blocks)-1 {
 			fmt.Println()
@@ -171,6 +171,33 @@ func handleExport() {
 	}
 
 	fmt.Println("Markdown file regenerated from database")
+}
+
+func handleIngest() {
+	if len(os.Args) < 4 {
+		fmt.Println("Error: ingest command requires tag and filename arguments")
+		fmt.Println("Usage: notes ingest \"tag\" filename")
+		os.Exit(1)
+	}
+
+	tag := os.Args[2]
+	if tag == "" {
+		fmt.Println("Error: tag cannot be empty")
+		os.Exit(1)
+	}
+
+	filename := os.Args[3]
+	if filename == "" {
+		fmt.Println("Error: filename cannot be empty")
+		os.Exit(1)
+	}
+
+	// Call reconciler to perform the ingestion
+	if err := reconciler.IngestTaggedBlocks(tag, filename); err != nil {
+		log.Fatalf("Failed to ingest blocks: %v", err)
+	}
+
+	fmt.Printf("Successfully replaced blocks containing '%s' with content from %s\n", tag, filename)
 }
 
 func handleWatch() {

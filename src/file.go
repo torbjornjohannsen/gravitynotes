@@ -134,3 +134,27 @@ func (fm *FileManager) DeleteBackup() error {
 
 	return os.Remove(backupPath)
 }
+
+func (fm *FileManager) ReadExternalMarkdownFile(filePath string) (string, error) {
+	// If not absolute, make it absolute from current working directory
+	if !filepath.IsAbs(filePath) {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return "", fmt.Errorf("failed to get current working directory: %w", err)
+		}
+		filePath = filepath.Join(cwd, filePath)
+	}
+	
+	// Check if file exists
+	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+		return "", fmt.Errorf("file not found: %s", filePath)
+	}
+	
+	// Read the file
+	content, err := os.ReadFile(filePath)
+	if err != nil {
+		return "", fmt.Errorf("failed to read external markdown file: %w", err)
+	}
+	
+	return string(content), nil
+}

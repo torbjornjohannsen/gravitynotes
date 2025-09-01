@@ -198,3 +198,57 @@ func (r *Reconciler) Initialize() error {
 	log.Println("Repository initialized successfully")
 	return nil
 }
+
+func (r *Reconciler) IngestTaggedBlocks(tag string, sourceFilePath string) error {
+	// Step 1: Read the external markdown file
+	content, err := r.fileManager.ReadExternalMarkdownFile(sourceFilePath)
+	if err != nil {
+		return fmt.Errorf("failed to read source file: %w", err)
+	}
+
+	// Step 2: Parse blocks from the file using existing parser
+	newBlocks := ParseBlocksFromMarkdown(content)
+
+	// Step 3: Delete existing blocks with the tag
+	deletedCount, err := r.db.DeleteBlocksByTag(tag)
+	if err != nil {
+		return fmt.Errorf("failed to delete blocks with tag '%s': %w", tag, err)
+	}
+	log.Printf("Deleted %d blocks containing '%s'", deletedCount, tag)
+
+	// Step 4: Add each block to database
+	addedCount := 0
+	for _, block := range newBlocks {
+		if block.IsEmpty() {
+			continue
+		}
+
+		// Check for existing block with same content hash
+		existingBlock, err := r.db.GetBlockByHash(block.ContentHash)
+		if err != nil {
+			return fmt.Errorf("failed to check existing block: %w", err)
+		}
+
+		if existingBlock == nil {
+			if err := r.db.CreateBlock(block); err != nil {
+				return fmt.Errorf("failed to create block: %w", err)
+			}
+			addedCount++
+			log.Printf("Created new block with hash: %s", block.ContentHash)
+		} else {
+			// Update timestamp if block already exists
+			if err := r.db.UpdateBlockTimestamp(block.ContentHash, time.Now()); err != nil {
+				return fmt.Errorf("failed to update existing block timestamp: %w", err)
+			}
+			log.Printf("Updated timestamp for existing block with hash: %s", block.ContentHash)
+		}
+	}
+	log.Printf("Added %d new blocks from %s", addedCount, sourceFilePath)
+
+	// Step 5: Regenerate the main notes.md file
+	if err := r.RegenerateMarkdownFile(); err != nil {
+		return fmt.Errorf("failed to regenerate markdown: %w", err)
+	}
+
+	return nil
+}
