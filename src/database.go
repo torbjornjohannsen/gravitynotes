@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -60,8 +61,8 @@ func (d *Database) Close() error {
 func (d *Database) CreateBlock(block *Block) error {
 	query := `INSERT INTO blocks (content, content_hash, created_at, updated_at) 
 			  VALUES (?, ?, ?, ?)`
-	
-	result, err := d.db.Exec(query, block.Content, block.ContentHash, 
+
+	result, err := d.db.Exec(query, block.Content, block.ContentHash,
 		block.CreatedAt, block.UpdatedAt)
 	if err != nil {
 		return fmt.Errorf("failed to insert block: %w", err)
@@ -79,11 +80,11 @@ func (d *Database) CreateBlock(block *Block) error {
 func (d *Database) GetBlockByHash(hash string) (*Block, error) {
 	query := `SELECT id, content, content_hash, created_at, updated_at 
 			  FROM blocks WHERE content_hash = ?`
-	
+
 	row := d.db.QueryRow(query, hash)
-	
+
 	var block Block
-	err := row.Scan(&block.ID, &block.Content, &block.ContentHash, 
+	err := row.Scan(&block.ID, &block.Content, &block.ContentHash,
 		&block.CreatedAt, &block.UpdatedAt)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -98,7 +99,7 @@ func (d *Database) GetBlockByHash(hash string) (*Block, error) {
 func (d *Database) GetAllBlocks() ([]*Block, error) {
 	query := `SELECT id, content, content_hash, created_at, updated_at 
 			  FROM blocks ORDER BY updated_at DESC`
-	
+
 	rows, err := d.db.Query(query)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query blocks: %w", err)
@@ -140,7 +141,7 @@ func (d *Database) UpdateBlockTimestamp(hash string, timestamp time.Time) error 
 func (d *Database) GetMetadata(key string) (string, error) {
 	query := `SELECT value FROM metadata WHERE key = ?`
 	row := d.db.QueryRow(query, key)
-	
+
 	var value string
 	err := row.Scan(&value)
 	if err != nil {
@@ -149,7 +150,7 @@ func (d *Database) GetMetadata(key string) (string, error) {
 		}
 		return "", fmt.Errorf("failed to get metadata: %w", err)
 	}
-	
+
 	return value, nil
 }
 
@@ -162,11 +163,39 @@ func (d *Database) SetMetadata(key, value string) error {
 	return nil
 }
 
-func (d *Database) SearchBlocks(searchTerm string) ([]*Block, error) {
+func (d *Database) SearchBlocks(includeKeywords, excludeKeywords []string) ([]*Block, error) {
+	if len(includeKeywords) == 0 && len(excludeKeywords) == 0 {
+		return nil, fmt.Errorf("at least one keyword is required")
+	}
+
+	var whereParts []string
+	var args []any
+
+	// Build include conditions (OR logic for union)
+	if len(includeKeywords) > 0 {
+		var includeParts []string
+		for _, keyword := range includeKeywords {
+			includeParts = append(includeParts, "content LIKE ?")
+			args = append(args, "%"+keyword+"%")
+		}
+		whereParts = append(whereParts, "("+strings.Join(includeParts, " OR ")+")")
+	}
+
+	// Build exclude conditions (AND NOT logic)
+	for _, keyword := range excludeKeywords {
+		whereParts = append(whereParts, "content NOT LIKE ?")
+		args = append(args, "%"+keyword+"%")
+	}
+
+	// If we only have exclude keywords and no include keywords, we need to select all blocks first
+	if len(includeKeywords) == 0 && len(excludeKeywords) > 0 {
+		whereParts = append([]string{"1=1"}, whereParts...)
+	}
+
 	query := `SELECT id, content, content_hash, created_at, updated_at 
-			  FROM blocks WHERE content LIKE ? ORDER BY updated_at DESC`
-	
-	rows, err := d.db.Query(query, "%"+searchTerm+"%")
+			  FROM blocks WHERE ` + strings.Join(whereParts, " AND ") + ` ORDER BY updated_at DESC`
+
+	rows, err := d.db.Query(query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to search blocks: %w", err)
 	}
@@ -189,7 +218,7 @@ func (d *Database) SearchBlocks(searchTerm string) ([]*Block, error) {
 func (d *Database) GetBlocksCreatedAfter(timestamp time.Time) ([]*Block, error) {
 	query := `SELECT id, content, content_hash, created_at, updated_at 
 			  FROM blocks WHERE created_at > ? ORDER BY updated_at DESC`
-	
+
 	rows, err := d.db.Query(query, timestamp)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query blocks: %w", err)
@@ -216,11 +245,11 @@ func (d *Database) DeleteBlocksByTag(tag string) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("failed to delete blocks with tag '%s': %w", tag, err)
 	}
-	
+
 	rowsAffected, err := result.RowsAffected()
 	if err != nil {
 		return 0, fmt.Errorf("failed to get affected rows count: %w", err)
 	}
-	
+
 	return int(rowsAffected), nil
 }

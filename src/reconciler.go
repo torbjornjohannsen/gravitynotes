@@ -173,8 +173,8 @@ func (r *Reconciler) AddBlock(content string) error {
 	return r.RegenerateMarkdownFile()
 }
 
-func (r *Reconciler) SearchBlocks(searchTerm string) ([]*Block, error) {
-	blocks, err := r.db.SearchBlocks(searchTerm)
+func (r *Reconciler) SearchBlocks(includeKeywords, excludeKeywords []string) ([]*Block, error) {
+	blocks, err := r.db.SearchBlocks(includeKeywords, excludeKeywords)
 	if err != nil {
 		return nil, fmt.Errorf("failed to search blocks: %w", err)
 	}

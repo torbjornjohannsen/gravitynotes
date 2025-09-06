@@ -76,7 +76,8 @@ func printUsage() {
 	fmt.Println("Commands:")
 	fmt.Println("  init                    Initialize new repository")
 	fmt.Println("  add \"content\"            Add new note block")
-	fmt.Println("  grep \"search term\"       Search across all blocks")
+	fmt.Println("  grep \"term1\" \"term2\"      Search across all blocks (union of keywords)")
+	fmt.Println("  grep \"term\" \"!exclude\"    Use !prefix to exclude keywords")
 	fmt.Println("  export                  Force regenerate .md from DB")
 	fmt.Println("  ingest \"tag\" filename    Replace all blocks containing tag with file content")
 	fmt.Println("  watch                   Start file watcher (development)")
@@ -136,29 +137,47 @@ func handleAdd() {
 
 func handleGrep() {
 	if len(os.Args) < 3 {
-		fmt.Println("Error: grep command requires search term")
-		fmt.Println("Usage: notes grep \"search term\"")
+		fmt.Println("Error: grep command requires search term(s)")
+		fmt.Println("Usage: notes grep \"term1\" \"term2\" -\"excluded\"")
 		os.Exit(1)
 	}
 
-	searchTerm := os.Args[2]
-	if searchTerm == "" {
-		fmt.Println("Error: search term cannot be empty")
+	// Parse all arguments after "notes grep"
+	args := os.Args[2:]
+	var includeKeywords []string
+	var excludeKeywords []string
+
+	for _, arg := range args {
+		if arg == "" {
+			continue
+		}
+		if arg[0] == '-' {
+			// Remove the ! prefix for exclude keywords
+			if len(arg) > 1 {
+				excludeKeywords = append(excludeKeywords, arg[1:])
+			}
+		} else {
+			includeKeywords = append(includeKeywords, arg)
+		}
+	}
+
+	if len(includeKeywords) == 0 && len(excludeKeywords) == 0 {
+		fmt.Println("Error: at least one search term is required")
 		os.Exit(1)
 	}
 
-	blocks, err := reconciler.SearchBlocks(searchTerm)
+	blocks, err := reconciler.SearchBlocks(includeKeywords, excludeKeywords)
 	if err != nil {
 		log.Fatalf("Failed to search: %v", err)
 	}
 
 	if len(blocks) == 0 {
-		fmt.Printf("No blocks found matching '%s'\n", searchTerm)
+		fmt.Println("No blocks found matching the specified criteria")
 		return
 	}
 
-	for i, block := range blocks {
-		fmt.Println(block.Content)
+	for i := len(blocks) - 1; i >= 0; i-- {
+		fmt.Println(blocks[i].Content)
 		if i < len(blocks)-1 {
 			fmt.Println()
 		}
