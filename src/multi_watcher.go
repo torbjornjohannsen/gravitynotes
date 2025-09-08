@@ -10,49 +10,47 @@ import (
 )
 
 type MultiFileWatcher struct {
-	reconciler     *Reconciler
-	fileManager    *FileManager
-	watcher        *fsnotify.Watcher
-	watchedFiles   map[string]bool
-	stopCh         chan bool
-	mu             sync.RWMutex
-	IsRunning      bool // Made public
-	debounceTimers map[string]*time.Timer
+	watcher             *fsnotify.Watcher
+	db                  *Database
+	respondToFileChange map[string]bool
+	stopCh              chan bool
+	mu                  sync.RWMutex
+	IsRunning           bool // Made public
+	debounceTimers      map[string]*time.Timer
+	reconcilers         map[string]*Reconciler
 }
 
-func NewMultiFileWatcher(reconciler *Reconciler, fileManager *FileManager) (*MultiFileWatcher, error) {
+func NewMultiFileWatcher(db *Database) (*MultiFileWatcher, error) {
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		return nil, fmt.Errorf("failed to create file watcher: %w", err)
 	}
 
 	return &MultiFileWatcher{
-		reconciler:     reconciler,
-		fileManager:    fileManager,
-		watcher:        watcher,
-		watchedFiles:   make(map[string]bool),
-		stopCh:         make(chan bool),
-		debounceTimers: make(map[string]*time.Timer),
+		watcher:             watcher,
+		db:                  db,
+		respondToFileChange: make(map[string]bool),
+		stopCh:              make(chan bool),
+		debounceTimers:      make(map[string]*time.Timer),
+		reconcilers:         make(map[string]*Reconciler),
 	}, nil
 }
 
 func (mfw *MultiFileWatcher) AddFile(filePath string) error {
-	mfw.mu.Lock()
-	defer mfw.mu.Unlock()
 
 	// Resolve to absolute path
-	absPath, err := mfw.fileManager.ResolveAbsolutePath(filePath)
+	absPath, err := ResolveAbsolutePath(filePath)
 	if err != nil {
 		return fmt.Errorf("failed to resolve file path: %w", err)
 	}
 
 	// Check if file exists
-	if !mfw.fileManager.fileExists(absPath) {
+	if !fileExists(absPath) {
 		return fmt.Errorf("file does not exist: %s", absPath)
 	}
 
 	// Add to database as watched file
-	if err := mfw.reconciler.db.AddWatchedFile(absPath); err != nil {
+	if err := mfw.db.AddWatchedFile(absPath); err != nil {
 		return fmt.Errorf("failed to add watched file to database: %w", err)
 	}
 
@@ -61,11 +59,16 @@ func (mfw *MultiFileWatcher) AddFile(filePath string) error {
 		return fmt.Errorf("failed to add file to watcher: %w", err)
 	}
 
-	mfw.watchedFiles[absPath] = true
+	newFileManager := NewFileManager(absPath)
+	newReconciler := NewReconciler(mfw.db, newFileManager)
+
+	mfw.reconcilers[absPath] = newReconciler
+	mfw.respondToFileChange[absPath] = true
+
 	log.Printf("Started watching file: %s", absPath)
 
 	// Perform initial reconciliation
-	if err := mfw.reconciler.ReconcileFromSpecificFile(absPath); err != nil {
+	if err := mfw.reconcilers[absPath].ReconcileFromSpecificFile(); err != nil {
 		log.Printf("Failed initial reconciliation for %s: %v", absPath, err)
 	}
 
@@ -77,7 +80,7 @@ func (mfw *MultiFileWatcher) RemoveFile(filePath string) error {
 	defer mfw.mu.Unlock()
 
 	// Resolve to absolute path
-	absPath, err := mfw.fileManager.ResolveAbsolutePath(filePath)
+	absPath, err := ResolveAbsolutePath(filePath)
 	if err != nil {
 		return fmt.Errorf("failed to resolve file path: %w", err)
 	}
@@ -88,11 +91,12 @@ func (mfw *MultiFileWatcher) RemoveFile(filePath string) error {
 	}
 
 	// Remove from database (this will cascade delete file_blocks)
-	if err := mfw.reconciler.db.RemoveWatchedFile(absPath); err != nil {
+	if err := mfw.db.RemoveWatchedFile(absPath); err != nil {
 		return fmt.Errorf("failed to remove watched file from database: %w", err)
 	}
 
-	delete(mfw.watchedFiles, absPath)
+	delete(mfw.respondToFileChange, absPath)
+	delete(mfw.reconcilers, absPath)
 
 	// Clean up debounce timer if exists
 	if timer, exists := mfw.debounceTimers[absPath]; exists {
@@ -105,35 +109,23 @@ func (mfw *MultiFileWatcher) RemoveFile(filePath string) error {
 }
 
 func (mfw *MultiFileWatcher) Start() error {
-	mfw.mu.Lock()
-	defer mfw.mu.Unlock()
 
 	if mfw.IsRunning {
 		return fmt.Errorf("multi-file watcher is already running")
 	}
 
+	mfw.mu.Lock()
+	defer mfw.mu.Unlock()
+
 	// Load existing watched files from database
-	watchedFiles, err := mfw.reconciler.db.GetWatchedFiles()
+	watchedFiles, err := mfw.db.GetWatchedFiles()
 	if err != nil {
 		return fmt.Errorf("failed to get watched files: %w", err)
 	}
 
-	// Add each watched file to fsnotify
+	// Add each watched file
 	for _, filePath := range watchedFiles {
-		if mfw.fileManager.fileExists(filePath) {
-			if err := mfw.watcher.Add(filePath); err != nil {
-				log.Printf("Warning: failed to watch existing file %s: %v", filePath, err)
-				continue
-			}
-			mfw.watchedFiles[filePath] = true
-			log.Printf("Resumed watching file: %s", filePath)
-		} else {
-			// File was deleted, remove from database
-			log.Printf("Watched file %s no longer exists, removing from database", filePath)
-			if err := mfw.reconciler.db.RemoveWatchedFile(filePath); err != nil {
-				log.Printf("Warning: failed to remove deleted file from database: %v", err)
-			}
-		}
+		mfw.AddFile(filePath)
 	}
 
 	mfw.IsRunning = true
@@ -194,11 +186,12 @@ func (mfw *MultiFileWatcher) watchLoop() {
 }
 
 func (mfw *MultiFileWatcher) shouldProcessEvent(event fsnotify.Event) bool {
-	mfw.mu.RLock()
-	defer mfw.mu.RUnlock()
+	mfw.mu.Lock()
+	defer mfw.mu.Unlock()
 
-	// Check if we're watching this file
-	if !mfw.watchedFiles[event.Name] {
+	if !mfw.respondToFileChange[event.Name] {
+		// don't ignore the next
+		mfw.respondToFileChange[event.Name] = true
 		return false
 	}
 
@@ -233,13 +226,22 @@ func (mfw *MultiFileWatcher) debounceEvent(filePath string) {
 
 	// Create new timer
 	mfw.debounceTimers[filePath] = time.AfterFunc(200*time.Millisecond, func() {
-		if err := mfw.reconciler.ReconcileFromSpecificFile(filePath); err != nil {
+		if err := mfw.reconcilers[filePath].ReconcileFromSpecificFile(); err != nil {
 			log.Printf("Reconciliation failed for %s: %v", filePath, err)
 		} else {
 			log.Printf("Reconciliation completed for %s", filePath)
 		}
 
+		if err := mfw.reconcilers[filePath].RegenerateSpecificFile(); err != nil {
+			log.Printf("Regeneration failed for %s: %v", filePath, err)
+		} else {
+			log.Printf("Regenerated %s successfully", filePath)
+		}
+
 		mfw.mu.Lock()
+		// make sure we don't run an infinite loop
+		// - by ignoring the write event we have caused by regenerating
+		mfw.respondToFileChange[filePath] = false
 		delete(mfw.debounceTimers, filePath)
 		mfw.mu.Unlock()
 	})
@@ -249,52 +251,35 @@ func (mfw *MultiFileWatcher) SyncWithDatabase() error {
 	mfw.mu.Lock()
 	defer mfw.mu.Unlock()
 
-	// Get files that should be watched according to database
-	dbFiles, err := mfw.reconciler.db.GetWatchedFiles()
+	watchedFiles, err := mfw.db.GetWatchedFiles()
 	if err != nil {
 		return fmt.Errorf("failed to get watched files from database: %w", err)
 	}
 
 	// Convert to set for easy lookup
 	dbFileSet := make(map[string]bool)
-	for _, file := range dbFiles {
+	for _, file := range watchedFiles {
 		dbFileSet[file] = true
 	}
 
 	// Add files from database that we're not currently watching
-	for _, file := range dbFiles {
-		if !mfw.watchedFiles[file] && mfw.fileManager.fileExists(file) {
-			// Add to fsnotify watcher
-			if err := mfw.watcher.Add(file); err != nil {
-				log.Printf("Warning: failed to add file to watcher: %s: %v", file, err)
-				continue
-			}
-
-			mfw.watchedFiles[file] = true
-			log.Printf("Started watching file: %s", file)
-
-			// Perform initial reconciliation
-			if err := mfw.reconciler.ReconcileFromSpecificFile(file); err != nil {
-				log.Printf("Warning: initial reconciliation failed for %s: %v", file, err)
-			}
-		} else if !mfw.watchedFiles[file] && !mfw.fileManager.fileExists(file) {
-			// File in database but doesn't exist - remove from database
-			log.Printf("File %s no longer exists, removing from database", file)
-			if err := mfw.reconciler.db.RemoveWatchedFile(file); err != nil {
-				log.Printf("Warning: failed to remove non-existent file from database: %v", err)
-			}
+	for _, file := range watchedFiles {
+		_, ok := mfw.reconcilers[file]
+		if !ok {
+			mfw.AddFile(file)
 		}
 	}
 
 	// Remove files that are no longer in the database
-	for file := range mfw.watchedFiles {
+	for file := range mfw.respondToFileChange {
 		if !dbFileSet[file] {
 			// Remove from fsnotify watcher
 			if err := mfw.watcher.Remove(file); err != nil {
 				log.Printf("Warning: failed to remove file from watcher: %s: %v", file, err)
 			}
 
-			delete(mfw.watchedFiles, file)
+			delete(mfw.respondToFileChange, file)
+			delete(mfw.reconcilers, file)
 
 			// Clean up debounce timer if exists
 			if timer, exists := mfw.debounceTimers[file]; exists {

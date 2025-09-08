@@ -12,9 +12,7 @@ import (
 
 var (
 	db               *Database
-	fileManager      *FileManager
-	reconciler       *Reconciler
-	watcher          *FileWatcher      // Legacy single file watcher
+	dbPath           string
 	multiFileWatcher *MultiFileWatcher // New multi-file watcher
 )
 
@@ -35,21 +33,19 @@ func main() {
 		}
 	}
 
-	fileManager = NewFileManager(basePath)
+	dbPath = filepath.Join(basePath, "notes.db")
 
 	if command != "init" {
-		if !fileManager.DatabaseExists() {
-			fmt.Printf("Error: No notes repository found in %s. Run 'notes init' first.\n", fileManager.dbPath)
+		if !fileExists(dbPath) {
+			fmt.Printf("Error: No notes repository found in %s. Run 'notes init' first.\n", dbPath)
 			os.Exit(1)
 		}
 
-		db, err = NewDatabase(fileManager.GetDBPath())
+		db, err = NewDatabase(dbPath)
 		if err != nil {
 			log.Fatalf("Failed to open database: %v", err)
 		}
 		defer db.Close()
-
-		reconciler = NewReconciler(db, fileManager)
 	}
 
 	switch command {
@@ -59,8 +55,6 @@ func main() {
 		handleAdd()
 	case "grep":
 		handleGrep()
-	case "ingest":
-		handleIngest()
 	case "watch":
 		handleWatch()
 	case "unwatch":
@@ -82,42 +76,24 @@ func printUsage() {
 	fmt.Println("  add \"content\"            Add new note block")
 	fmt.Println("  grep \"term1\" \"term2\"      Search across all blocks (union of keywords)")
 	fmt.Println("  grep \"term\" \"-excluded\"   Use -prefix to exclude keywords")
-	fmt.Println("  ingest \"tag\" filename    Replace all blocks containing tag with file content")
 	fmt.Println("  watcher                 Start the file watcher daemon")
 	fmt.Println("  watch <file>            Add file to watch list")
 	fmt.Println("  unwatch <file>          Remove file from watch list")
 }
 
 func handleInit() {
-	basePath := os.Getenv("NOTES_PATH")
-	if basePath == "" {
-		var err error
-		basePath, err = os.Getwd()
-		if err != nil {
-			log.Fatalf("Failed to get current directory: %v", err)
-		}
-	}
-
-	fm := NewFileManager(basePath)
-
-	if fm.DatabaseExists() {
-		fmt.Printf("Repository already exists at %s\n", filepath.Dir(fm.GetDBPath()))
+	if fileExists(dbPath) {
+		fmt.Printf("Repository already exists at %s\n", filepath.Dir(dbPath))
 		return
 	}
 
-	database, err := NewDatabase(fm.GetDBPath())
+	database, err := NewDatabase(dbPath)
 	if err != nil {
 		log.Fatalf("Failed to initialize database: %v", err)
 	}
 	defer database.Close()
 
-	reconciler := NewReconciler(database, fm)
-
-	if err := reconciler.Initialize(); err != nil {
-		log.Fatalf("Failed to initialize repository: %v", err)
-	}
-
-	fmt.Printf("Initialized empty notes repository at %s\n", filepath.Dir(fm.GetDBPath()))
+	fmt.Printf("Initialized empty notes repository at %s\n", filepath.Dir(dbPath))
 }
 
 func handleAdd() {
@@ -133,7 +109,9 @@ func handleAdd() {
 		os.Exit(1)
 	}
 
-	if err := reconciler.AddBlock(content); err != nil {
+	newBlock := NewBlock(content)
+
+	if err := db.CreateBlock(newBlock); err != nil {
 		log.Fatalf("Failed to add note: %v", err)
 	}
 
@@ -171,7 +149,7 @@ func handleGrep() {
 		os.Exit(1)
 	}
 
-	blocks, err := reconciler.SearchBlocks(includeKeywords, excludeKeywords)
+	blocks, err := db.SearchBlocks(includeKeywords, excludeKeywords)
 	if err != nil {
 		log.Fatalf("Failed to search: %v", err)
 	}
@@ -189,33 +167,6 @@ func handleGrep() {
 	}
 }
 
-func handleIngest() {
-	if len(os.Args) < 4 {
-		fmt.Println("Error: ingest command requires tag and filename arguments")
-		fmt.Println("Usage: notes ingest \"tag\" filename")
-		os.Exit(1)
-	}
-
-	tag := os.Args[2]
-	if tag == "" {
-		fmt.Println("Error: tag cannot be empty")
-		os.Exit(1)
-	}
-
-	filename := os.Args[3]
-	if filename == "" {
-		fmt.Println("Error: filename cannot be empty")
-		os.Exit(1)
-	}
-
-	// Call reconciler to perform the ingestion
-	if err := reconciler.IngestTaggedBlocks(tag, filename); err != nil {
-		log.Fatalf("Failed to ingest blocks: %v", err)
-	}
-
-	fmt.Printf("Successfully replaced blocks containing '%s' with content from %s\n", tag, filename)
-}
-
 func handleWatch() {
 	if len(os.Args) < 3 {
 		fmt.Println("Error: watch command requires a file path")
@@ -226,22 +177,22 @@ func handleWatch() {
 	filePath := os.Args[2]
 
 	// Resolve to absolute path for consistency
-	absPath, err := fileManager.ResolveAbsolutePath(filePath)
+	absPath, err := ResolveAbsolutePath(filePath)
 	if err != nil {
 		log.Fatalf("Failed to resolve file path: %v", err)
 	}
 
 	// Check if file exists
-	if !fileManager.fileExists(absPath) {
+	if !fileExists(absPath) {
 		log.Fatalf("File does not exist: %s", absPath)
 	}
 
 	// Add file to watched files in database
-	if err := db.AddWatchedFile(absPath); err != nil {
+	if err := db.AddWatchedFile(filePath); err != nil {
 		log.Fatalf("Failed to add file to watch list: %v", err)
 	}
 
-	fmt.Printf("Added %s to watch list\n", absPath)
+	fmt.Printf("Added %s to watch list\n", filePath)
 	fmt.Println("Start the watcher daemon with: notes watcher")
 }
 
@@ -255,7 +206,7 @@ func handleUnwatch() {
 	filePath := os.Args[2]
 
 	// Resolve to absolute path for consistency
-	absPath, err := fileManager.ResolveAbsolutePath(filePath)
+	absPath, err := ResolveAbsolutePath(filePath)
 	if err != nil {
 		log.Fatalf("Failed to resolve file path: %v", err)
 	}
@@ -281,14 +232,14 @@ func handleUnwatch() {
 }
 
 func handleWatcher() {
-	fmt.Println("Starting file watcher daemon...")
-
 	// Initialize multi-file watcher
 	var err error
-	multiFileWatcher, err = NewMultiFileWatcher(reconciler, fileManager)
+	multiFileWatcher, err = NewMultiFileWatcher(db)
 	if err != nil {
 		log.Fatalf("Failed to create multi-file watcher: %v", err)
 	}
+
+	fmt.Println("Starting file watcher daemon...")
 
 	// Start the watcher
 	if err := multiFileWatcher.Start(); err != nil {
