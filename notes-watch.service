@@ -1,0 +1,14 @@
+[Unit]
+Description=GravityNotes Watch Daemon
+After=network.target
+
+[Service]
+Type=simple
+User=tb
+WorkingDirectory=/**your notes path**
+ExecStart=/**your notes path**/notes watcher
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
