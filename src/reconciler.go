@@ -209,15 +209,9 @@ func (r *Reconciler) IngestTaggedBlocks(tag string, sourceFilePath string) error
 	// Step 2: Parse blocks from the file using existing parser
 	newBlocks := ParseBlocksFromMarkdown(content)
 
-	// Step 3: Delete existing blocks with the tag
-	deletedCount, err := r.db.DeleteBlocksByTag(tag)
-	if err != nil {
-		return fmt.Errorf("failed to delete blocks with tag '%s': %w", tag, err)
-	}
-	log.Printf("Deleted %d blocks containing '%s'", deletedCount, tag)
-
-	// Step 4: Add each block to database
+	// Step 3: Add only new blocks to database (append-only behavior)
 	addedCount := 0
+	skippedCount := 0
 	for _, block := range newBlocks {
 		if block.IsEmpty() {
 			continue
@@ -230,25 +224,138 @@ func (r *Reconciler) IngestTaggedBlocks(tag string, sourceFilePath string) error
 		}
 
 		if existingBlock == nil {
+			// New block - add to top by updating timestamp to now
+			block.UpdatedAt = time.Now()
 			if err := r.db.CreateBlock(block); err != nil {
 				return fmt.Errorf("failed to create block: %w", err)
 			}
 			addedCount++
 			log.Printf("Created new block with hash: %s", block.ContentHash)
 		} else {
-			// Update timestamp if block already exists
-			if err := r.db.UpdateBlockTimestamp(block.ContentHash, time.Now()); err != nil {
-				return fmt.Errorf("failed to update existing block timestamp: %w", err)
-			}
-			log.Printf("Updated timestamp for existing block with hash: %s", block.ContentHash)
+			// Block already exists - skip it
+			skippedCount++
 		}
 	}
-	log.Printf("Added %d new blocks from %s", addedCount, sourceFilePath)
+	log.Printf("Added %d new blocks from %s (skipped %d duplicates)", addedCount, sourceFilePath, skippedCount)
 
-	// Step 5: Regenerate the main notes.md file
+	// Step 4: Regenerate the main notes.md file
 	if err := r.RegenerateMarkdownFile(); err != nil {
 		return fmt.Errorf("failed to regenerate markdown: %w", err)
 	}
 
+	return nil
+}
+
+func (r *Reconciler) ReconcileFromSpecificFile(filePath string) error {
+	// Resolve to absolute path for consistency
+	absPath, err := r.fileManager.ResolveAbsolutePath(filePath)
+	if err != nil {
+		return fmt.Errorf("failed to resolve file path: %w", err)
+	}
+
+	// Read the file content
+	content, err := r.fileManager.ReadFile(absPath)
+	if err != nil {
+		return fmt.Errorf("failed to read file %s: %w", absPath, err)
+	}
+
+	// Parse blocks from the file
+	fileBlocks := ParseBlocksFromMarkdown(content)
+
+	// Get current block hashes associated with this file
+	currentHashes, err := r.db.GetFileBlockHashes(absPath)
+	if err != nil {
+		return fmt.Errorf("failed to get current file blocks: %w", err)
+	}
+
+	// Create map of current hashes for quick lookup
+	currentHashSet := make(map[string]bool)
+	for _, hash := range currentHashes {
+		currentHashSet[hash] = true
+	}
+
+	// Process blocks from file
+	newHashSet := make(map[string]bool)
+	for _, fileBlock := range fileBlocks {
+		if fileBlock.IsEmpty() {
+			continue
+		}
+
+		newHashSet[fileBlock.ContentHash] = true
+
+		// Check if block exists in database
+		existingBlock, err := r.db.GetBlockByHash(fileBlock.ContentHash)
+		if err != nil {
+			return fmt.Errorf("failed to get block by hash: %w", err)
+		}
+
+		if existingBlock == nil {
+			// Create new block
+			if err := r.db.CreateBlock(fileBlock); err != nil {
+				return fmt.Errorf("failed to create new block: %w", err)
+			}
+			log.Printf("Created new block with hash: %s", fileBlock.ContentHash)
+		} else {
+			// Update timestamp for existing block
+			if err := r.db.UpdateBlockTimestamp(fileBlock.ContentHash, time.Now()); err != nil {
+				return fmt.Errorf("failed to update block timestamp: %w", err)
+			}
+		}
+
+		// Add file-block association
+		if err := r.db.AddFileBlockAssociation(absPath, fileBlock.ContentHash); err != nil {
+			return fmt.Errorf("failed to add file-block association: %w", err)
+		}
+	}
+
+	// Remove blocks that are no longer in the file
+	// This will delete them entirely from the database (global deletion)
+	for _, hash := range currentHashes {
+		if !newHashSet[hash] {
+			// Block was deleted from this file - delete it entirely from database
+			if err := r.db.DeleteBlockByHash(hash); err != nil {
+				return fmt.Errorf("failed to delete block: %w", err)
+			}
+			log.Printf("Deleted block with hash: %s (removed from %s)", hash, absPath)
+		}
+	}
+
+	return nil
+}
+
+func (r *Reconciler) RegenerateSpecificFile(filePath string) error {
+	// Resolve to absolute path for consistency
+	absPath, err := r.fileManager.ResolveAbsolutePath(filePath)
+	if err != nil {
+		return fmt.Errorf("failed to resolve file path: %w", err)
+	}
+
+	// Get block hashes for this file
+	hashes, err := r.db.GetFileBlockHashes(absPath)
+	if err != nil {
+		return fmt.Errorf("failed to get file block hashes: %w", err)
+	}
+
+	// Get actual blocks for these hashes
+	var blocks []*Block
+	for _, hash := range hashes {
+		block, err := r.db.GetBlockByHash(hash)
+		if err != nil {
+			return fmt.Errorf("failed to get block by hash: %w", err)
+		}
+		if block != nil {
+			blocks = append(blocks, block)
+		}
+	}
+
+	// Convert to markdown
+	content := BlocksToMarkdown(blocks)
+
+	// Write to file
+	if err := r.fileManager.WriteFile(absPath, content); err != nil {
+		return fmt.Errorf("failed to write file: %w", err)
+	}
+
+	log.Printf("Regenerated file %s with %d blocks", absPath, len(blocks))
 	return nil
 }

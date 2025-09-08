@@ -7,13 +7,15 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 )
 
 var (
-	db          *Database
-	fileManager *FileManager
-	reconciler  *Reconciler
-	watcher     *FileWatcher
+	db               *Database
+	fileManager      *FileManager
+	reconciler       *Reconciler
+	watcher          *FileWatcher      // Legacy single file watcher
+	multiFileWatcher *MultiFileWatcher // New multi-file watcher
 )
 
 func main() {
@@ -57,12 +59,14 @@ func main() {
 		handleAdd()
 	case "grep":
 		handleGrep()
-	case "export":
-		handleExport()
 	case "ingest":
 		handleIngest()
 	case "watch":
 		handleWatch()
+	case "unwatch":
+		handleUnwatch()
+	case "watcher":
+		handleWatcher()
 	default:
 		fmt.Printf("Unknown command: %s\n", command)
 		printUsage()
@@ -77,10 +81,11 @@ func printUsage() {
 	fmt.Println("  init                    Initialize new repository")
 	fmt.Println("  add \"content\"            Add new note block")
 	fmt.Println("  grep \"term1\" \"term2\"      Search across all blocks (union of keywords)")
-	fmt.Println("  grep \"term\" \"!exclude\"    Use !prefix to exclude keywords")
-	fmt.Println("  export                  Force regenerate .md from DB")
+	fmt.Println("  grep \"term\" \"-excluded\"   Use -prefix to exclude keywords")
 	fmt.Println("  ingest \"tag\" filename    Replace all blocks containing tag with file content")
-	fmt.Println("  watch                   Start file watcher (development)")
+	fmt.Println("  watcher                 Start the file watcher daemon")
+	fmt.Println("  watch <file>            Add file to watch list")
+	fmt.Println("  unwatch <file>          Remove file from watch list")
 }
 
 func handleInit() {
@@ -176,20 +181,12 @@ func handleGrep() {
 		return
 	}
 
-	for i := len(blocks) - 1; i >= 0; i-- {
-		fmt.Println(blocks[i].Content)
+	for i, block := range blocks {
+		fmt.Println(block.Content)
 		if i < len(blocks)-1 {
 			fmt.Println()
 		}
 	}
-}
-
-func handleExport() {
-	if err := reconciler.RegenerateMarkdownFile(); err != nil {
-		log.Fatalf("Failed to export: %v", err)
-	}
-
-	fmt.Println("Markdown file regenerated from database")
 }
 
 func handleIngest() {
@@ -220,25 +217,114 @@ func handleIngest() {
 }
 
 func handleWatch() {
-	watcher, err := NewFileWatcher(reconciler, fileManager)
+	if len(os.Args) < 3 {
+		fmt.Println("Error: watch command requires a file path")
+		fmt.Println("Usage: notes watch <file>")
+		os.Exit(1)
+	}
+
+	filePath := os.Args[2]
+
+	// Resolve to absolute path for consistency
+	absPath, err := fileManager.ResolveAbsolutePath(filePath)
 	if err != nil {
-		log.Fatalf("Failed to create file watcher: %v", err)
+		log.Fatalf("Failed to resolve file path: %v", err)
 	}
 
-	if err := watcher.Start(); err != nil {
-		log.Fatalf("Failed to start file watcher: %v", err)
+	// Check if file exists
+	if !fileManager.fileExists(absPath) {
+		log.Fatalf("File does not exist: %s", absPath)
 	}
 
-	fmt.Printf("Watching %s for changes. Press Ctrl+C to stop.\n",
-		fileManager.GetNotesPath())
+	// Add file to watched files in database
+	if err := db.AddWatchedFile(absPath); err != nil {
+		log.Fatalf("Failed to add file to watch list: %v", err)
+	}
 
+	fmt.Printf("Added %s to watch list\n", absPath)
+	fmt.Println("Start the watcher daemon with: notes watcher")
+}
+
+func handleUnwatch() {
+	if len(os.Args) < 3 {
+		fmt.Println("Error: unwatch command requires a file path")
+		fmt.Println("Usage: notes unwatch <file>")
+		os.Exit(1)
+	}
+
+	filePath := os.Args[2]
+
+	// Resolve to absolute path for consistency
+	absPath, err := fileManager.ResolveAbsolutePath(filePath)
+	if err != nil {
+		log.Fatalf("Failed to resolve file path: %v", err)
+	}
+
+	// Check if file is in watch list
+	isWatched, err := db.IsFileWatched(absPath)
+	if err != nil {
+		log.Fatalf("Failed to check if file is watched: %v", err)
+	}
+
+	if !isWatched {
+		fmt.Printf("File %s is not in the watch list\n", absPath)
+		return
+	}
+
+	// Remove file from database
+	if err := db.RemoveWatchedFile(absPath); err != nil {
+		log.Fatalf("Failed to remove file from watch list: %v", err)
+	}
+
+	fmt.Printf("Removed %s from watch list\n", absPath)
+	fmt.Println("The watcher daemon will pick up these changes automatically")
+}
+
+func handleWatcher() {
+	fmt.Println("Starting file watcher daemon...")
+
+	// Initialize multi-file watcher
+	var err error
+	multiFileWatcher, err = NewMultiFileWatcher(reconciler, fileManager)
+	if err != nil {
+		log.Fatalf("Failed to create multi-file watcher: %v", err)
+	}
+
+	// Start the watcher
+	if err := multiFileWatcher.Start(); err != nil {
+		log.Fatalf("Failed to start multi-file watcher: %v", err)
+	}
+
+	fmt.Println("File watcher daemon started. Monitoring for database changes...")
+	fmt.Printf("Press Ctrl+C to stop the daemon.\n\n")
+
+	// Set up periodic database sync
+	syncTicker := time.NewTicker(5 * time.Second)
+	defer syncTicker.Stop()
+
+	// Set up signal handling for graceful shutdown
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
-	<-sigCh
-	fmt.Println("\nStopping file watcher...")
+	// Main daemon loop
+	for {
+		select {
+		case <-syncTicker.C:
+			// Periodically sync with database
+			if err := multiFileWatcher.SyncWithDatabase(); err != nil {
+				log.Printf("Error syncing with database: %v", err)
+			}
 
-	if err := watcher.Stop(); err != nil {
-		log.Printf("Error stopping watcher: %v", err)
+		case sig := <-sigCh:
+			fmt.Printf("\nReceived %s signal. Shutting down gracefully...\n", sig)
+
+			// Stop the multi-file watcher
+			if err := multiFileWatcher.Stop(); err != nil {
+				log.Printf("Error stopping watcher: %v", err)
+			}
+
+			fmt.Println("File watcher daemon stopped.")
+			return
+		}
 	}
 }

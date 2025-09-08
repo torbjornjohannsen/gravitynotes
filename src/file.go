@@ -27,35 +27,60 @@ func (fm *FileManager) GetDBPath() string {
 }
 
 func (fm *FileManager) ReadMarkdownFile() (string, error) {
-	if !fm.markdownFileExists() {
+	return fm.ReadFile(fm.notesPath)
+}
+
+func (fm *FileManager) ReadFile(filePath string) (string, error) {
+	if !fm.fileExists(filePath) {
 		return "", nil
 	}
 
-	content, err := os.ReadFile(fm.notesPath)
+	content, err := os.ReadFile(filePath)
 	if err != nil {
-		return "", fmt.Errorf("failed to read markdown file: %w", err)
+		return "", fmt.Errorf("failed to read file %s: %w", filePath, err)
 	}
 
 	return string(content), nil
 }
 
 func (fm *FileManager) WriteMarkdownFile(content string) error {
-	err := os.WriteFile(fm.notesPath, []byte(content), 0644)
+	return fm.WriteFile(fm.notesPath, content)
+}
+
+func (fm *FileManager) WriteFile(filePath, content string) error {
+	err := os.WriteFile(filePath, []byte(content), 0644)
 	if err != nil {
-		return fmt.Errorf("failed to write markdown file: %w", err)
+		return fmt.Errorf("failed to write file %s: %w", filePath, err)
 	}
 
 	return nil
 }
 
 func (fm *FileManager) markdownFileExists() bool {
-	_, err := os.Stat(fm.notesPath)
+	return fm.fileExists(fm.notesPath)
+}
+
+func (fm *FileManager) fileExists(filePath string) bool {
+	_, err := os.Stat(filePath)
 	return !os.IsNotExist(err)
 }
 
 func (fm *FileManager) DatabaseExists() bool {
 	_, err := os.Stat(fm.dbPath)
 	return !os.IsNotExist(err)
+}
+
+func (fm *FileManager) ResolveAbsolutePath(filePath string) (string, error) {
+	if filepath.IsAbs(filePath) {
+		return filePath, nil
+	}
+	
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", fmt.Errorf("failed to get current working directory: %w", err)
+	}
+	
+	return filepath.Join(cwd, filePath), nil
 }
 
 func (fm *FileManager) EnsureDirectoryExists() error {
