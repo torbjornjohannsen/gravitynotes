@@ -188,11 +188,11 @@ func handleWatch() {
 	}
 
 	// Add file to watched files in database
-	if err := db.AddWatchedFile(filePath); err != nil {
+	if err := db.AddWatchedFile(absPath); err != nil {
 		log.Fatalf("Failed to add file to watch list: %v", err)
 	}
 
-	fmt.Printf("Added %s to watch list\n", filePath)
+	fmt.Printf("Added %s to watch list\n", absPath)
 	fmt.Println("Start the watcher daemon with: notes watcher")
 }
 

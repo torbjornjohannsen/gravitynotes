@@ -189,17 +189,24 @@ func (mfw *MultiFileWatcher) shouldProcessEvent(event fsnotify.Event) bool {
 	mfw.mu.Lock()
 	defer mfw.mu.Unlock()
 
-	if !mfw.respondToFileChange[event.Name] {
+	absPath, err := ResolveAbsolutePath(event.Name)
+
+	if err != nil {
+		log.Println("Error resolving absolute path of event: %v ", err)
+		return false
+	}
+
+	if !mfw.respondToFileChange[absPath] {
 		// don't ignore the next
-		mfw.respondToFileChange[event.Name] = true
+		mfw.respondToFileChange[absPath] = true
 		return false
 	}
 
 	// Handle file deletion
 	if event.Op&fsnotify.Remove == fsnotify.Remove {
-		log.Printf("Watched file deleted: %s", event.Name)
+		log.Printf("Watched file deleted: %s", absPath)
 		go func() {
-			if err := mfw.RemoveFile(event.Name); err != nil {
+			if err := mfw.RemoveFile(absPath); err != nil {
 				log.Printf("Error removing deleted file: %v", err)
 			}
 		}()
@@ -208,7 +215,7 @@ func (mfw *MultiFileWatcher) shouldProcessEvent(event fsnotify.Event) bool {
 
 	// Process write and create events
 	if event.Op&fsnotify.Write == fsnotify.Write || event.Op&fsnotify.Create == fsnotify.Create {
-		log.Printf("File change detected: %s", event.Name)
+		log.Printf("File change detected: %s", absPath)
 		return true
 	}
 
