@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/sha256"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 )
@@ -18,7 +19,7 @@ type Block struct {
 func NewBlock(content string) *Block {
 	now := time.Now()
 	trimmedContent := strings.TrimSpace(content)
-	
+
 	return &Block{
 		Content:     trimmedContent,
 		ContentHash: generateContentHash(trimmedContent),
@@ -83,6 +84,10 @@ func BlocksToMarkdown(blocks []*Block) string {
 		return ""
 	}
 
+	slices.SortStableFunc(blocks, func(a, b *Block) int {
+		return b.CreatedAt.Compare(a.CreatedAt)
+	})
+
 	var sections []string
 	for _, block := range blocks {
 		if !block.IsEmpty() {
@@ -105,13 +110,13 @@ func FindBlocksByContentHash(blocks []*Block, targetHash string) *Block {
 func FilterBlocksByContent(blocks []*Block, searchTerm string) []*Block {
 	var matches []*Block
 	searchLower := strings.ToLower(searchTerm)
-	
+
 	for _, block := range blocks {
 		contentLower := strings.ToLower(block.Content)
 		if strings.Contains(contentLower, searchLower) {
 			matches = append(matches, block)
 		}
 	}
-	
+
 	return matches
 }
